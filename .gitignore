@@ -40,3 +40,6 @@ venv/
 
 # gitleaks 报告
 gitleaks-report.json
+
+# nest 门牌：本地指针文件，记录该目录对应私有库的哪个节点，不进仓库
+.nest
