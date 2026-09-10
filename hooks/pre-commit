@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# nest pre-commit — 阻止密钥入仓
+# 有 gitleaks 就用 gitleaks；没有就退回内置正则扫描（只扫新增行）。
+
+set -uo pipefail
+
+RED=$'\033[31m'; YEL=$'\033[33m'; OFF=$'\033[0m'
+fail() { printf '%s✗ 提交被拒绝%s %s\n' "$RED" "$OFF" "$1" >&2; }
+
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -n "$staged" ] || exit 0
+
+# ---- 1. 文件名黑名单（.gitignore 之外的第二道闸） ----
+blocked=""
+while IFS= read -r f; do
+  case "$(basename "$f")" in
+    .env|.env.*|credentials.json|id_rsa|id_ed25519|*.key|*.pem|*.p12|*.pfx|*.keystore)
+      blocked="$blocked  $f\n" ;;
+  esac
+done <<< "$staged"
+
+if [ -n "$blocked" ]; then
+  fail "以下文件属于禁止入仓类型："
+  printf "$blocked" >&2
+  printf '  确需提交请用 git commit --no-verify（并先想清楚）\n' >&2
+  exit 1
+fi
+
+# ---- 2. 内容扫描 ----
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --redact --no-banner; then
+    fail "gitleaks 检出疑似密钥"
+    exit 1
+  fi
+  exit 0
+fi
+
+printf '%s!%s 未安装 gitleaks，使用内置正则兜底扫描（建议安装 gitleaks 获得完整覆盖）\n' "$YEL" "$OFF" >&2
+
+# 只看新增行，去掉 diff 的 + 前缀
+added="$(git diff --cached -U0 --diff-filter=ACM | grep '^+' | grep -v '^+++' | sed 's/^+//')"
+[ -n "$added" ] || exit 0
+
+patterns='
+(AKIA|ASIA)[0-9A-Z]{16}
+gh[pousr]_[A-Za-z0-9]{20,}
+sk-[A-Za-z0-9_-]{24,}
+xox[baprs]-[A-Za-z0-9-]{10,}
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+(api[_-]?key|secret|passwd|password|token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{16,}["'"'"']
+'
+
+hit=0
+while IFS= read -r pat; do
+  [ -n "$pat" ] || continue
+  # -e 必须：BEGIN PRIVATE KEY 规则以 - 开头，否则被当成选项
+  match="$(printf '%s\n' "$added" | grep -nE -e "$pat" | head -n 3 || true)"
+  if [ -n "$match" ]; then
+    [ "$hit" = 0 ] && fail "新增内容中发现疑似密钥："
+    hit=1
+    printf '  规则 %s\n' "$pat" >&2
+    printf '%s\n' "$match" | sed 's/^/    /' | cut -c1-120 >&2
+  fi
+done <<< "$patterns"
+
+if [ "$hit" = 1 ]; then
+  printf '  误报请用 git commit --no-verify\n' >&2
+  exit 1
+fi
+
+exit 0

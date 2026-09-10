@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""nest-keys —— 钥匙名单管理（只能在服务器本地用 root 跑）
+
+  nest-keys list                 列出待批申请
+  nest-keys show <id>            看某条申请的详情（含指纹）
+  nest-keys approve <id> --fingerprint SHA256:xxx
+                                 批准。必须带指纹，且要与申请里的一致
+  nest-keys reject <id> [理由]   驳回
+  nest-keys authorized           列出当前已授权的钥匙
+  nest-keys revoke <name>        吊销某个名字对应的钥匙
+
+设计要点：
+  - 批准时必须显式抄一遍指纹。防的是"看都不看就批" —— 指纹应当由申请方
+    通过另一个渠道（当面/聊天工具/agent 直接汇报）告诉你，两边对上才批。
+  - 写入 authorized_keys 的限制前缀由本脚本生成，绝不采信申请里的任何内容。
+  - 每次批准/驳回/吊销都写审计日志。
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+STATE_DIR = os.environ.get("NEST_ENROLL_STATE", "/var/lib/nest-enroll")
+PENDING_DIR = os.path.join(STATE_DIR, "pending")
+DECIDED_DIR = os.path.join(STATE_DIR, "decided")
+AUDIT_LOG = os.path.join(STATE_DIR, "audit.log")
+
+GIT_USER = os.environ.get("NEST_GIT_USER", "git")
+AUTH_KEYS = os.environ.get("NEST_AUTH_KEYS", "/home/git/.ssh/authorized_keys")
+
+# 这把钥匙只能做 git 收发：不给端口转发、不给 agent 转发、不给伪终端
+RESTRICTIONS = "no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty"
+
+PUBKEY_RE = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/]{43,86}={0,3}(?: [\x20-\x7e]{0,100})?$")
+NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{2,32}$")
+
+C_RED, C_GRN, C_YEL, C_DIM, C_OFF = "\033[31m", "\033[32m", "\033[33m", "\033[2m", "\033[0m"
+
+
+def die(msg):
+    print(f"{C_RED}✗{C_OFF} {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def ok(msg):
+    print(f"{C_GRN}✓{C_OFF} {msg}")
+
+
+def audit(action, detail):
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{action}\t{detail}\t(by {os.environ.get('SUDO_USER') or os.getlogin()})\n"
+    with open(AUDIT_LOG, "a") as f:
+        f.write(line)
+    os.chmod(AUDIT_LOG, 0o600)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        die("需要 root 权限（写 authorized_keys）")
+
+
+def load(req_id, where=(PENDING_DIR, DECIDED_DIR)):
+    if not re.match(r"^[A-Za-z0-9_-]{1,32}$", req_id):
+        die("id 无效")
+    for d in where:
+        p = os.path.join(d, f"{req_id}.json")
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f), p
+    die(f"查无此申请：{req_id}")
+
+
+def fingerprint_of(pubkey):
+    with tempfile.NamedTemporaryFile("w", suffix=".pub", delete=False) as f:
+        f.write(pubkey + "\n")
+        tmp = f.name
+    try:
+        out = subprocess.run(["ssh-keygen", "-l", "-f", tmp],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
+        parts = out.stdout.split()
+        return parts[1] if len(parts) >= 2 else None
+    finally:
+        os.unlink(tmp)
+
+
+def read_auth_lines():
+    if not os.path.exists(AUTH_KEYS):
+        return []
+    with open(AUTH_KEYS) as f:
+        return [l.rstrip("\n") for l in f if l.strip()]
+
+
+def write_auth_lines(lines):
+    """原子写入，保持属主与权限。"""
+    d = os.path.dirname(AUTH_KEYS)
+    with tempfile.NamedTemporaryFile("w", dir=d, delete=False) as f:
+        for l in lines:
+            f.write(l + "\n")
+        tmp = f.name
+    import pwd
+    ent = pwd.getpwnam(GIT_USER)
+    os.chown(tmp, ent.pw_uid, ent.pw_gid)
+    os.chmod(tmp, 0o600)
+    shutil.move(tmp, AUTH_KEYS)
+
+
+def cmd_list(_):
+    try:
+        files = sorted(os.listdir(PENDING_DIR))
+    except OSError:
+        die(f"状态目录不可读：{PENDING_DIR}")
+    files = [f for f in files if f.endswith(".json")]
+    if not files:
+        print("没有待批申请")
+        return
+    print(f"待批申请 {len(files)} 条：\n")
+    for fn in files:
+        with open(os.path.join(PENDING_DIR, fn)) as f:
+            r = json.load(f)
+        print(f"  id={r['id']}  name={r['name']}")
+        print(f"     指纹 {r['fingerprint']}")
+        print(f"     来源 {r['ip']}  提交于 {r['submitted_at']}")
+        if r.get("note"):
+            print(f"     备注 {r['note']}")
+        print()
+    print(f"{C_DIM}批准前请通过其他渠道核对指纹：nest-keys approve <id> --fingerprint SHA256:...{C_OFF}")
+
+
+def cmd_show(args):
+    if not args:
+        die("用法：nest-keys show <id>")
+    rec, path = load(args[0])
+    print(json.dumps(rec, ensure_ascii=False, indent=2))
+    print(f"\n{C_DIM}文件：{path}{C_OFF}")
+
+
+def cmd_approve(args):
+    require_root()
+    if len(args) < 3 or args[1] not in ("--fingerprint", "-f"):
+        die("用法：nest-keys approve <id> --fingerprint SHA256:xxx\n"
+            "  指纹必须由申请方通过另一个渠道告诉你，不要直接从这个页面上抄。")
+
+    req_id, claimed_fp = args[0], args[2]
+    rec, path = load(req_id, where=(PENDING_DIR,))
+
+    # 三重校验：申请里的指纹、你抄的指纹、公钥现算的指纹，必须三者一致
+    actual_fp = fingerprint_of(rec["pubkey"])
+    if not actual_fp:
+        die("公钥无法解析，拒绝批准")
+    if actual_fp != rec["fingerprint"]:
+        die(f"申请记录被篡改：记录内指纹 {rec['fingerprint']}，实际 {actual_fp}")
+    if claimed_fp.strip() != actual_fp:
+        die(f"指纹不匹配。\n  你输入的：{claimed_fp}\n  申请实际：{actual_fp}\n"
+            "  对不上说明申请可能是冒名提交的，不要批准。")
+
+    # 不采信申请里的任何格式，重新校验一遍
+    if not PUBKEY_RE.match(rec["pubkey"]) or not NAME_RE.match(rec["name"]):
+        die("公钥或名称未通过二次校验，拒绝批准")
+
+    lines = read_auth_lines()
+    if any(rec["pubkey"].split()[1] in l for l in lines):
+        die("这把钥匙已在名单中")
+
+    # 名字是吊销时的唯一凭据。允许重名会让 revoke 一次砍掉多把钥匙，
+    # 所以在这里挡住 —— 名字由申请方自选且不受校验，重名很容易发生。
+    if any(l.rstrip().endswith(f'nest:{rec["name"]}') for l in lines):
+        die(f'名单里已有同名条目 nest:{rec["name"]}。\n'
+            "  重名会让吊销时无法区分，必须先处理：\n"
+            f"  - 若是同一设备换钥匙：先 nest-keys revoke {rec['name']}，再批准本条\n"
+            f"  - 若是不同设备：让对方改用另一个标识重新提交\n"
+            "  当前名单：nest-keys authorized")
+
+    # 限制前缀由本脚本生成，注释用申请的 name 作为吊销时的标识
+    lines.append(f'{RESTRICTIONS} {rec["pubkey"].split()[0]} {rec["pubkey"].split()[1]} nest:{rec["name"]}')
+    write_auth_lines(lines)
+
+    rec["status"] = "approved"
+    rec["decided_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(os.path.join(DECIDED_DIR, f"{req_id}.json"), "w") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=2)
+    os.chmod(os.path.join(DECIDED_DIR, f"{req_id}.json"), 0o600)
+    os.unlink(path)
+
+    audit("approve", f"{rec['name']} {actual_fp}")
+    ok(f"已批准 {rec['name']}（{actual_fp}）")
+    print(f"{C_DIM}对方现在可以 clone：git@nest.example.com:/srv/git/nest-sync.git{C_OFF}")
+
+
+def cmd_reject(args):
+    require_root()
+    if not args:
+        die("用法：nest-keys reject <id> [理由]")
+    req_id = args[0]
+    reason = " ".join(args[1:]) or "未说明"
+    rec, path = load(req_id, where=(PENDING_DIR,))
+    rec["status"] = "rejected"
+    rec["reason"] = reason
+    rec["decided_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(os.path.join(DECIDED_DIR, f"{req_id}.json"), "w") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=2)
+    os.unlink(path)
+    audit("reject", f"{rec['name']} {rec['fingerprint']} 理由={reason}")
+    ok(f"已驳回 {rec['name']}：{reason}")
+
+
+def cmd_authorized(_):
+    lines = read_auth_lines()
+    if not lines:
+        print("名单为空")
+        return
+    print(f"当前已授权 {len(lines)} 把钥匙：\n")
+    for l in lines:
+        parts = l.split()
+        keytype = next((p for p in parts if p.startswith(("ssh-", "ecdsa-"))), "?")
+        comment = parts[-1] if len(parts) > 2 else ""
+        fp = fingerprint_of(" ".join(parts[parts.index(keytype):parts.index(keytype) + 2]))
+        restricted = "no-pty" in l
+        flag = f"{C_GRN}受限{C_OFF}" if restricted else f"{C_YEL}未加限制{C_OFF}"
+        print(f"  {comment or '(无标识)'}\n     {fp}  {keytype}  [{flag}]")
+    print()
+
+
+def cmd_revoke(args):
+    require_root()
+    if not args:
+        die("用法：nest-keys revoke <name>")
+    name = args[0]
+    lines = read_auth_lines()
+    hit = [l for l in lines if l.rstrip().endswith(f"nest:{name}")]
+    keep = [l for l in lines if not l.rstrip().endswith(f"nest:{name}")]
+    if not hit:
+        die(f"名单里找不到 nest:{name}（用 nest-keys authorized 查看）")
+
+    # 明确告知移除了哪几把钥匙，避免"以为只吊销了一把"
+    fps = []
+    for l in hit:
+        parts = l.split()
+        try:
+            i = next(n for n, p in enumerate(parts) if p.startswith("ssh-"))
+            fps.append(fingerprint_of(" ".join(parts[i:i + 2])) or "?")
+        except StopIteration:
+            fps.append("?")
+    for fp in fps:
+        print(f"  移除 {fp}")
+
+    write_auth_lines(keep)
+    audit("revoke", f"{name} {' '.join(fps)}")
+    ok(f"已吊销 {name}，移除 {len(hit)} 把钥匙")
+
+
+COMMANDS = {
+    "list": cmd_list, "show": cmd_show, "approve": cmd_approve,
+    "reject": cmd_reject, "authorized": cmd_authorized, "revoke": cmd_revoke,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+    cmd = sys.argv[1]
+    if cmd not in COMMANDS:
+        die(f"未知子命令：{cmd}")
+    os.makedirs(DECIDED_DIR, mode=0o700, exist_ok=True)
+    COMMANDS[cmd](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

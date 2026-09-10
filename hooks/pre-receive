@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# nest pre-receive — 服务端密钥闸门（部署到 /srv/git/nest-sync.git/hooks/）
+#
+# 本地 pre-commit 可以被 --no-verify 绕过，这一道不能。
+# 有 gitleaks 就用 gitleaks，没有就用与 pre-commit 相同的内置正则。
+
+set -uo pipefail
+
+ZERO=0000000000000000000000000000000000000000
+RED=$'\033[31m'; OFF=$'\033[0m'
+reject() { printf '%s✗ 推送被拒绝%s %s\n' "$RED" "$OFF" "$1" >&2; }
+
+patterns='
+(AKIA|ASIA)[0-9A-Z]{16}
+gh[pousr]_[A-Za-z0-9]{20,}
+sk-[A-Za-z0-9_-]{24,}
+xox[baprs]-[A-Za-z0-9-]{10,}
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+(api[_-]?key|secret|passwd|password|token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{16,}["'"'"']
+'
+
+fail=0
+
+scan_commit() {
+  local sha="$1" files added match pat
+
+  # 1. 文件名黑名单
+  files="$(git diff-tree --no-commit-id --name-only -r --diff-filter=ACM "$sha")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "${f##*/}" in
+      .env|.env.*|credentials.json|id_rsa|id_ed25519|*.key|*.pem|*.p12|*.pfx|*.keystore)
+        reject "commit ${sha:0:8} 含禁止入仓的文件：$f"
+        fail=1 ;;
+    esac
+  done <<< "$files"
+
+  # 2. 新增行内容扫描
+  added="$(git diff-tree --no-commit-id -U0 -r --diff-filter=ACM "$sha" \
+           | grep '^+' | grep -v '^+++' | sed 's/^+//')"
+  [ -n "$added" ] || return 0
+
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    match="$(printf '%s\n' "$added" | grep -nE -e "$pat" | head -n 2)"
+    if [ -n "$match" ]; then
+      reject "commit ${sha:0:8} 新增内容命中密钥规则：$pat"
+      printf '%s\n' "$match" | cut -c1-120 | sed 's/^/    /' >&2
+      fail=1
+    fi
+  done <<< "$patterns"
+}
+
+# shellcheck disable=SC2034
+while read -r oldrev newrev refname; do
+  # 删除分支，无内容可扫
+  [ "$newrev" = "$ZERO" ] && continue
+
+  if [ "$oldrev" = "$ZERO" ]; then
+    revs="$(git rev-list "$newrev" --not --all)"
+  else
+    revs="$(git rev-list "$oldrev..$newrev")"
+  fi
+
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    if command -v gitleaks >/dev/null 2>&1; then
+      git log -1 -p "$sha" | gitleaks detect --pipe --redact --no-banner >/dev/null 2>&1 || {
+        reject "gitleaks 在 commit ${sha:0:8} 中检出疑似密钥"
+        fail=1
+      }
+    else
+      scan_commit "$sha"
+    fi
+  done <<< "$revs"
+done
+
+if [ "$fail" = 1 ]; then
+  printf '  密钥一旦进入 Git 历史就极难彻底清除，请改完再推。\n' >&2
+  printf '  确认误报可临时在服务端停用本 hook（不建议）。\n' >&2
+  exit 1
+fi
+
+exit 0

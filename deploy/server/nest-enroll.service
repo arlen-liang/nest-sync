@@ -1,0 +1,30 @@
+[Unit]
+Description=nest 注册受理服务
+After=network.target
+
+[Service]
+Type=simple
+User=nest-enroll
+Group=nest-enroll
+ExecStart=/usr/bin/python3 /opt/nest-enroll/nest-enroll.py
+Restart=on-failure
+RestartSec=5
+
+# 只允许写状态目录，其余文件系统一律只读
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/nest-enroll
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

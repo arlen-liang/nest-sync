@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>nest 接入申请</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1a1a1a; --dim: #6b6b6b; --line: #e2ded8;
+    --card: #ffffff; --code-bg: #f4f2ee; --accent: #8a5a2b; --warn-bg: #fdf6e8;
+    --warn-line: #e0c9a0; --danger: #a03530; --danger-bg: #fdf0ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a; --fg: #e8e6e3; --dim: #9a9792; --line: #2e3035;
+      --card: #1d1f23; --code-bg: #24262b; --accent: #d0a070; --warn-bg: #2a2418;
+      --warn-line: #5a4a28; --danger: #e08a84; --danger-bg: #2c1d1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a; --fg: #e8e6e3; --dim: #9a9792; --line: #2e3035;
+    --card: #1d1f23; --code-bg: #24262b; --accent: #d0a070; --warn-bg: #2a2418;
+    --warn-line: #5a4a28; --danger: #e08a84; --danger-bg: #2c1d1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .3rem; letter-spacing: -.01em; }
+  h2 {
+    font-size: 1.05rem; margin: 2.75rem 0 .85rem; padding-top: 1.1rem;
+    border-top: 1px solid var(--line);
+  }
+  h2 .n {
+    display: inline-block; min-width: 1.6em; color: var(--accent); font-variant-numeric: tabular-nums;
+  }
+  .lede { color: var(--dim); margin: 0 0 2rem; }
+  p { margin: .85rem 0; }
+  code {
+    background: var(--code-bg); padding: .12em .4em; border-radius: 3px;
+    font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-word;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .9rem 1rem; overflow-x: auto; margin: .85rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: .82rem; line-height: 1.6; }
+  .note, .danger {
+    border-radius: 6px; padding: .9rem 1.1rem; margin: 1.2rem 0; font-size: .92rem;
+  }
+  .note { background: var(--warn-bg); border: 1px solid var(--warn-line); }
+  .danger { background: var(--danger-bg); border: 1px solid var(--danger); }
+  .danger strong { color: var(--danger); }
+  .note p:first-child, .danger p:first-child { margin-top: 0; }
+  .note p:last-child, .danger p:last-child { margin-bottom: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--dim); font-size: .85rem; }
+  .wrap { overflow-x: auto; }
+  form { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1.25rem; }
+  label { display: block; font-size: .88rem; font-weight: 600; margin: .9rem 0 .3rem; }
+  label:first-child { margin-top: 0; }
+  input, textarea {
+    width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--bg); color: var(--fg); font-size: .9rem; font-family: inherit;
+  }
+  textarea { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .8rem; resize: vertical; }
+  button {
+    margin-top: 1.1rem; padding: .6rem 1.4rem; border: 0; border-radius: 5px;
+    background: var(--accent); color: #fff; font-size: .92rem; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #result { margin-top: 1rem; font-size: .9rem; }
+  .hint { color: var(--dim); font-size: .85rem; margin-top: .3rem; }
+  footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>nest 接入申请</h1>
+<p class="lede">申请把一台设备或一个 agent 接入 nest 技能库与日志库。</p>
+
+<p>接入分两步：你在自己机器上生成一把钥匙并提交<strong>公钥</strong>，由管理员人工核对后批准。私钥永远不要离开你的机器，也不要贴到这个页面上。</p>
+
+<div class="note">
+<p><strong>提交不等于获批。</strong>提交后你会拿到一串指纹，你需要通过<strong>另一个渠道</strong>（当面、聊天工具、对话）把这串指纹告知管理员。管理员会核对两边是否一致，对不上不予批准 —— 这样即使这个页面的密码泄露，冒名提交也进不来。</p>
+</div>
+
+<h2><span class="n">1.</span> 生成钥匙</h2>
+<p>只接受 ed25519 类型。在<strong>你自己的机器</strong>上执行：</p>
+<pre><code>ssh-keygen -t ed25519 -f ~/.ssh/nest_key -N "" -C "改成你的标识"
+cat ~/.ssh/nest_key.pub</code></pre>
+<p>最后一条命令输出的那一行就是公钥，可以公开。<code>~/.ssh/nest_key</code>（没有 <code>.pub</code> 后缀的那个）是私钥，任何情况下都不要发给别人。</p>
+
+<h2><span class="n">2.</span> 提交申请</h2>
+
+<p><strong>如果你是 agent 或习惯命令行：</strong></p>
+<pre><code>python3 - &lt;&lt;'PY' &gt; /tmp/nest-req.json
+import json, pathlib
+print(json.dumps({
+    "name": "agent-b",          # 2-32 位，只能用字母数字 . _ -
+    "pubkey": pathlib.Path("~/.ssh/nest_key.pub").expanduser().read_text().strip(),
+    "note": "内网部署机，需要读写"
+}, ensure_ascii=False))
+PY
+
+curl -sS --user '&lt;用户名&gt;' \
+     -H 'Content-Type: application/json' \
+     --data-binary @/tmp/nest-req.json \
+     https://nest.example.com/enroll/api/request</code></pre>
+<p class="hint">返回的 JSON 里有 <code>id</code>（查询进度用）和 <code>fingerprint</code>（需要你转告管理员的指纹）。</p>
+
+<p style="margin-top:1.8rem"><strong>如果你是人，用下面的表单：</strong></p>
+<form id="f">
+  <label for="name">标识</label>
+  <input id="name" name="name" required pattern="[a-zA-Z0-9._\-]{2,32}"
+         placeholder="agent-b" autocomplete="off">
+  <p class="hint">2-32 位，字母、数字、点、下划线、连字符。这个名字会成为吊销时的凭据。</p>
+
+  <label for="pubkey">公钥</label>
+  <textarea id="pubkey" name="pubkey" rows="3" required
+            placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... 你的标识"></textarea>
+  <p class="hint">粘贴 <code>~/.ssh/nest_key.pub</code> 的完整内容。确认开头是 <code>ssh-ed25519</code>。</p>
+
+  <label for="note">用途说明（可选）</label>
+  <input id="note" name="note" maxlength="200" placeholder="哪台机器、做什么用" autocomplete="off">
+
+  <button type="submit">提交申请</button>
+  <div id="result"></div>
+</form>
+
+<h2><span class="n">3.</span> 转告指纹</h2>
+<p>提交成功后你会看到一串形如 <code>SHA256:xxxxx…</code> 的指纹。<strong>通过另一个渠道</strong>把它发给管理员。管理员那边会执行核对，两边指纹一致才会批准。</p>
+
+<h2><span class="n">4.</span> 查询进度</h2>
+<pre><code>curl -sS --user '&lt;用户名&gt;' \
+     https://nest.example.com/enroll/api/status/&lt;你的id&gt;</code></pre>
+<p>状态变成 <code>approved</code> 后继续下一步。</p>
+
+<h2><span class="n">5.</span> 验证钥匙并安装</h2>
+<p><strong>不要改 <code>~/.ssh/config</code>。</strong>同一台机器上可能有别的 agent 也在用 nest，
+多个同名 <code>Host</code> 块会让 SSH 把各自的 <code>IdentityFile</code> 累积起来按顺序尝试，
+排在前面的<strong>别人的钥匙</strong>一旦有效就被采用 —— clone 会"成功"，但用的是别人的身份。
+用 <code>-i</code> 直接指定自己的钥匙：</p>
+<pre><code>ssh -i ~/.ssh/nest_key -o IdentitiesOnly=yes git@nest.example.com</code></pre>
+<div class="note">
+<p>看到 <code>fatal: Interactive git shell is not enabled.</code> <strong>就是成功了</strong>。这个账号被刻意限制成只能收发仓库，进不了 shell，所以拒绝交互式登录是预期行为。</p>
+<p>如果看到 <code>Permission denied (publickey)</code>，说明还没批准，或者用错了钥匙。</p>
+</div>
+
+<p>然后一键安装（脚本会把你的钥匙固定为仓库级 <code>core.sshCommand</code>，不碰 <code>~/.ssh/config</code>）：</p>
+<pre><code>curl -sS --user '&lt;用户名&gt;' https://nest.example.com/install.sh -o /tmp/nest-install.sh
+bash /tmp/nest-install.sh \
+  --repo git@nest.example.com:/srv/git/nest-sync.git \
+  --key ~/.ssh/nest_key --name agent-b -y
+echo 'export PATH="$HOME/.nest/bin:$PATH"' &gt;&gt; ~/.bashrc &amp;&amp; source ~/.bashrc</code></pre>
+
+<h2><span class="n">6.</span> 验证</h2>
+<pre><code>nest status
+nest recall &lt;项目名&gt;</code></pre>
+<p>能看到同步状态和日志内容，就装好了。</p>
+
+<h2><span class="n">7.</span> 日常命令</h2>
+<div class="wrap">
+<table>
+<tr><th>命令</th><th>什么时候用</th></tr>
+<tr><td><code>nest pull</code></td><td>开工前，拉云端最新</td></tr>
+<tr><td><code>nest push -m "说明"</code></td><td>收工后，回传本地改动</td></tr>
+<tr><td><code>nest recall &lt;项目名&gt;</code></td><td>唤回项目日志。只读，本地有未提交改动时照样能用</td></tr>
+<tr><td><code>nest status</code></td><td>看本地和云端差在哪</td></tr>
+</table>
+</div>
+<p>第一阶段全部手动触发，不挂自动 hook。</p>
+
+<h2><span class="n">8.</span> 红线</h2>
+<div class="danger">
+<p><strong>以下内容绝不能提交进这个仓库：</strong>API key、token、密码、证书私钥、个人隐私资料。</p>
+<p>仓库有两道自动闸门（本地提交时扫一次，服务端接收时再扫一次），但闸门只认已知格式，不替代判断。项目日志涉及真实主体时一律用 <code>[客户A]</code> 这类代号。</p>
+<p>判断标准：<strong>只放"丢了会心疼但不致命"的东西。</strong></p>
+</div>
+
+<footer>
+钥匙丢了或设备不再使用，立刻告诉管理员吊销 —— 报你当初提交的标识即可。
+</footer>
+
+</main>
+
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  const out = document.getElementById('result');
+  const body = {
+    name: document.getElementById('name').value.trim(),
+    pubkey: document.getElementById('pubkey').value.trim(),
+    note: document.getElementById('note').value.trim()
+  };
+  btn.disabled = true;
+  out.textContent = '提交中…';
+  try {
+    const r = await fetch('/enroll/api/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (r.ok) {
+      out.innerHTML =
+        '<div class="note"><p><strong>申请已提交。</strong></p>' +
+        '<p>申请编号 <code>' + esc(d.id) + '</code></p>' +
+        '<p>指纹 <code>' + esc(d.fingerprint) + '</code></p>' +
+        '<p>请把上面这串指纹通过另一个渠道发给管理员核对。</p></div>';
+      e.target.reset();
+    } else {
+      out.innerHTML = '<div class="danger"><p><strong>提交失败：</strong>' + esc(d.error || '未知错误') + '</p></div>';
+    }
+  } catch (err) {
+    out.innerHTML = '<div class="danger"><p><strong>网络错误：</strong>' + esc(String(err)) + '</p></div>';
+  } finally {
+    btn.disabled = false;
+  }
+});
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+</body>
+</html>

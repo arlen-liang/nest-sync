@@ -1,0 +1,42 @@
+# 密钥与凭证
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+credentials.json
+id_rsa
+id_ed25519
+
+# 二进制与 Office 文档：进了 Git 历史就删不干净
+*.docx
+*.doc
+*.pptx
+*.ppt
+*.xlsx
+*.xls
+*.pdf
+*.zip
+*.tar.gz
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp
+*.bak-*
+*~
+
+# 运行时
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 临时文件
+/tmp/
+*.log
+
+# gitleaks 报告
+gitleaks-report.json

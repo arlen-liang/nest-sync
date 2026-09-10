@@ -1,0 +1,930 @@
+#!/usr/bin/env bash
+# nest — 跨设备技能库 / 日志库同步工具（第一阶段：Git + 手动触发）
+#
+# 子命令：
+#   nest sync              一次搞定：先拉后推
+#   nest status            查看本地与云端差异
+#   nest pull              从云端拉取（rebase），并重建 skills 软链
+#   nest push [-m 说明]    把本地改动回传云端
+#   nest recall [项目] [关键词]  项目总览 / 统括 / 子文件，全程只读
+#   nest bind [slug]       把当前底稿文件夹绑定到 logs/ 节点（.nest 门牌）
+#   nest link              重建 skills 软链
+#
+# 也可用 nest-sync / nest-status / nest-pull / nest-push / nest-recall 等价调用。
+
+set -euo pipefail
+
+# 定位仓库。优先级：显式 NEST_BRAIN > 显式 NEST_HOME > 脚本自身位置 > 默认 ~/.nest/git
+#（2026-08-13 起仓库目录从 brain 改名为 git；旧路径仍可用，见下方回退）
+#
+# 靠脚本自身位置反推是关键：install.sh 把 <仓库>/bin/nest 单层软链到 <NEST_HOME>/bin/nest，
+# 解析一层软链后向上两级就是仓库根。没有这一步的话，同一台机器上装了多份 nest 时，
+# 在没设环境变量的新 shell 里调用任何一份，都会退回到 ~/.nest —— 操作到别人的仓库上去。
+self_brain() {
+  local src="$0" dir
+  [ -L "$src" ] && src="$(readlink "$src")"
+  case "$src" in
+    /*) ;;
+    *)  src="$(dirname "$0")/$src" ;;
+  esac
+  dir="$(cd "$(dirname "$src")/.." 2>/dev/null && pwd -P)" || return 1
+  [ -d "$dir/.git" ] || return 1
+  printf '%s' "$dir"
+}
+
+if [ -n "${NEST_BRAIN:-}" ]; then
+  :
+elif [ -n "${NEST_HOME:-}" ]; then
+  NEST_BRAIN="$NEST_HOME/git"
+  [ -d "$NEST_BRAIN/.git" ] || { [ -d "$NEST_HOME/brain/.git" ] && NEST_BRAIN="$NEST_HOME/brain"; } || true
+else
+  NEST_BRAIN="$(self_brain || true)"
+  if [ -z "$NEST_BRAIN" ]; then
+    NEST_BRAIN="$HOME/.nest/git"
+    [ -d "$NEST_BRAIN/.git" ] || { [ -d "$HOME/.nest/brain/.git" ] && NEST_BRAIN="$HOME/.nest/brain"; } || true
+  fi
+fi
+NEST_HOME="${NEST_HOME:-$(dirname "$NEST_BRAIN")}"
+
+# 自动识别本机装了哪些 harness：只往已存在的 harness 目录里建软链，
+# 不凭空创建目录（否则会在没装的 harness 下留下空壳）。
+# 这里只是常见默认值，装了别的 harness 用下面的 NEST_LINK_TARGETS 显式覆盖。
+detect_link_targets() {
+  local d found=""
+  for d in "$HOME/.claude" "$HOME/.kimi-code" "$HOME/.codex"; do
+    [ -d "$d" ] && found="$found $d/skills"
+  done
+  printf '%s' "${found# }"
+}
+# 需要接收 skills 软链的 harness 目录，空格分隔。显式设置则完全覆盖自动识别。
+NEST_LINK_TARGETS="${NEST_LINK_TARGETS:-$(detect_link_targets)}"
+# 本设备要拉取的技能大类（skills/ 下的一级目录名），空格分隔。空 = 全部。
+# 通常写在 ~/.nest/config 里，例如 NEST_LINK_CATEGORIES="meta work"
+NEST_LINK_CATEGORIES="${NEST_LINK_CATEGORIES:-}"
+# recall 默认全文输出的行数上限，超过则截断
+NEST_RECALL_MAX_LINES="${NEST_RECALL_MAX_LINES:-400}"
+
+if [ -f "$NEST_HOME/config" ]; then
+  # shellcheck disable=SC1091
+  . "$NEST_HOME/config"
+fi
+
+# ---------- 输出 ----------
+
+if [ -t 1 ]; then
+  C_DIM=$'\033[2m'; C_RED=$'\033[31m'; C_GRN=$'\033[32m'
+  C_YEL=$'\033[33m'; C_BLD=$'\033[1m'; C_OFF=$'\033[0m'
+else
+  C_DIM=""; C_RED=""; C_GRN=""; C_YEL=""; C_BLD=""; C_OFF=""
+fi
+
+info() { printf '%s\n' "$*"; }
+dim()  { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+ok()   { printf '%s✓%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+head1() { printf '%s%s%s\n' "$C_BLD" "$*" "$C_OFF"; }
+
+# ---------- Git 基础 ----------
+
+# core.quotepath=false：否则中文文件名会被输出成 \351\205 这类八进制转义
+git_b() { git -C "$NEST_BRAIN" -c core.quotepath=false "$@"; }
+
+require_repo() {
+  [ -d "$NEST_BRAIN/.git" ] || die "找不到仓库 ${NEST_BRAIN}，请先运行 install.sh"
+}
+
+has_remote() { git_b remote get-url origin >/dev/null 2>&1; }
+
+default_branch() {
+  local ref
+  ref="$(git_b symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref##*/}"
+  else
+    git_b rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'main\n'
+  fi
+}
+
+BRANCH=""
+REMOTE_REF=""
+init_refs() {
+  BRANCH="$(default_branch)"
+  REMOTE_REF="origin/$BRANCH"
+}
+
+remote_ref_exists() { git_b rev-parse --verify --quiet "$REMOTE_REF" >/dev/null 2>&1; }
+
+# 静默 fetch；离线时只警告，不中断（recall 必须在离线下仍可用）
+fetch_quiet() {
+  has_remote || { warn "未配置 origin，跳过 fetch"; return 0; }
+  if ! git_b fetch --quiet origin 2>/dev/null; then
+    warn "无法连接云端，使用上次同步的版本"
+    return 1
+  fi
+  return 0
+}
+
+dirty_files() { git_b status --porcelain --untracked-files=all; }
+is_dirty() { [ -n "$(dirty_files)" ]; }
+
+# 本地领先 / 落后的提交数，输出 "ahead behind"
+ahead_behind() {
+  if remote_ref_exists; then
+    git_b rev-list --left-right --count "HEAD...$REMOTE_REF" 2>/dev/null | tr '\t' ' '
+  else
+    printf '0 0\n'
+  fi
+}
+
+commit_line() {
+  git_b log -1 --format='%h  %cd  %s' --date=format:'%Y-%m-%d %H:%M' "$1" 2>/dev/null || printf '(无)\n'
+}
+
+# ---------- link ----------
+
+# 大类是否被本设备选中（NEST_LINK_CATEGORIES 为空 = 全选）
+category_selected() {
+  [ -z "$NEST_LINK_CATEGORIES" ] && return 0
+  case " $NEST_LINK_CATEGORIES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 判断某个路径是否是 nest 管理的软链（单层软链，指向真身仓库的 skills/ 内）
+is_nest_link() {
+  local p="$1" target
+  [ -L "$p" ] || return 1
+  target="$(readlink "$p")"
+  case "$target" in
+    "$NEST_BRAIN"/skills/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_link() {
+  require_repo
+
+  # --force：接入前手动放过技能副本时，真实目录会挡住软链。加此参数改为备份后替换。
+  local force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+
+  local src_dir="$NEST_BRAIN/skills"
+  [ -d "$src_dir" ] || die "$src_dir 不存在"
+
+  if [ -z "$NEST_LINK_TARGETS" ]; then
+    warn "没找到任何 harness 技能目录（找过 .claude / .kimi-code / .codex）"
+    dim "  如需指定：NEST_LINK_TARGETS=\"~/xxx/skills\" nest link"
+    return 0
+  fi
+
+  local target created=0 removed=0 skipped=0
+  for target in $NEST_LINK_TARGETS; do
+    mkdir -p "$target"
+
+    # 1) 清理：失效的 nest 软链（云端删掉的技能），以及被取消勾选大类的软链
+    local entry name
+    for entry in "$target"/* "$target"/.[!.]*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      is_nest_link "$entry" || continue
+      if [ ! -e "$entry" ]; then
+        rm -f "$entry"
+        removed=$((removed + 1))
+        dim "  清理失效软链 $entry"
+      else
+        local etarget ecat
+        etarget="$(readlink "$entry")"
+        ecat="${etarget#"$NEST_BRAIN"/skills/}"; ecat="${ecat%%/*}"
+        if ! category_selected "$ecat"; then
+          rm -f "$entry"
+          removed=$((removed + 1))
+          dim "  移除未选大类（${ecat}）的软链 $entry"
+        fi
+      fi
+    done
+
+    # 2) 重建软链，遍历 skills/<大类>/<技能>，按大类过滤。
+    #    -n 关键：目标已是指向目录的软链时替换它，而不是链到它内部
+    local cat_dir cat skill
+    for cat_dir in "$src_dir"/*/; do
+      [ -d "$cat_dir" ] || continue
+      cat="$(basename "$cat_dir")"
+      category_selected "$cat" || continue
+    for skill in "$cat_dir"*/; do
+      [ -d "$skill" ] || continue
+      skill="${skill%/}"
+      name="$(basename "$skill")"
+      local link="$target/$name"
+      if [ -e "$link" ] && ! [ -L "$link" ]; then
+        if [ "$force" = 1 ]; then
+          local backup
+          backup="$link.bak-$(date +%Y%m%d%H%M%S)"
+          mv "$link" "$backup"
+          dim "  已备份原目录到 $backup"
+        else
+          warn "跳过 ${link}：已存在同名真实目录（本地自有技能），nest 不覆盖"
+          dim "    若这是接入前的临时副本，用 nest link --force 备份后替换"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      fi
+      if [ -L "$link" ] && ! is_nest_link "$link"; then
+        warn "跳过 $link"
+        dim "    它指向 $(readlink "$link")"
+        dim "    不属于本副本（${NEST_BRAIN}），nest 不覆盖别人的软链"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      ln -sfn "$skill" "$link"
+      created=$((created + 1))
+    done
+    done
+  done
+
+  ok "软链完成：$created 个已链接，$removed 个已清理，$skipped 个跳过"
+}
+
+# ---------- status ----------
+
+cmd_status() {
+  require_repo
+  init_refs
+  local do_fetch=1
+  [ "${1:-}" = "--no-fetch" ] && do_fetch=0
+  [ "$do_fetch" = 1 ] && fetch_quiet || true
+
+  head1 "仓库：$NEST_BRAIN  分支：$BRANCH"
+  info "本地：$(commit_line HEAD)"
+  if remote_ref_exists; then
+    info "云端：$(commit_line "$REMOTE_REF")"
+  else
+    warn "云端：尚未配置或未同步过 origin/$BRANCH"
+    return 0
+  fi
+
+  local ab ahead behind
+  ab="$(ahead_behind)"; ahead="${ab%% *}"; behind="${ab##* }"
+
+  local dirty
+  dirty="$(dirty_files)"
+  if [ -n "$dirty" ]; then
+    printf '\n'
+    head1 "本地未提交的改动："
+    printf '%s\n' "$dirty" | sed 's/^/  /'
+  fi
+
+  if [ "$ahead" -gt 0 ]; then
+    printf '\n'
+    head1 "本地已提交但未推送（$ahead 个提交）："
+    git_b diff --name-only "$REMOTE_REF...HEAD" | sed 's/^/  /'
+  fi
+
+  if [ "$behind" -gt 0 ]; then
+    printf '\n'
+    head1 "云端有新内容待拉取（$behind 个提交）："
+    git_b diff --name-only "HEAD...$REMOTE_REF" | sed 's/^/  /'
+  fi
+
+  printf '\n'
+  if [ -z "$dirty" ] && [ "$ahead" = 0 ] && [ "$behind" = 0 ]; then
+    ok "已与云端同步"
+  else
+    [ "$behind" -gt 0 ] && dim "→ 运行 nest pull 拉取云端更新"
+    { [ -n "$dirty" ] || [ "$ahead" -gt 0 ]; } && dim "→ 运行 nest push 回传本地改动"
+  fi
+  return 0
+}
+
+# ---------- pull ----------
+
+cmd_pull() {
+  require_repo
+  init_refs
+
+  # 先解析参数：--autostash 必须在脏工作区检查之前生效
+  local autostash=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --autostash) autostash=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+
+  has_remote || die "未配置 origin，无法拉取"
+  git_b fetch origin || die "fetch 失败，检查网络或 SSH key"
+  remote_ref_exists || die "云端没有 $REMOTE_REF 分支"
+
+  local ab ahead behind
+  ab="$(ahead_behind)"; ahead="${ab%% *}"; behind="${ab##* }"
+
+  if [ "$behind" = 0 ]; then
+    ok "已是最新（云端无新提交）"
+    cmd_link
+    return 0
+  fi
+
+  if [ "$autostash" = 0 ] && is_dirty; then
+    warn "本地有未提交的改动，rebase 会失败："
+    dirty_files | sed 's/^/  /' >&2
+    printf '\n' >&2
+    dim "选一个："
+    dim "  nest push            先把本地改动提交并回传（推荐）"
+    dim "  nest pull --autostash 临时收起改动，rebase 后自动恢复"
+    exit 1
+  fi
+
+  head1 "拉取 $behind 个云端提交："
+  git_b log --oneline "HEAD..$REMOTE_REF" | sed 's/^/  /'
+
+  local rebase_args=""
+  [ "$autostash" = 1 ] && rebase_args="--autostash"
+
+  # shellcheck disable=SC2086
+  if ! git_b rebase $rebase_args "$REMOTE_REF"; then
+    printf '\n' >&2
+    warn "rebase 出现冲突，需要人工处理："
+    git_b diff --name-only --diff-filter=U | sed 's/^/  /' >&2
+    dim "  处理完运行 git -C $NEST_BRAIN rebase --continue"
+    dim "  放弃则运行 git -C $NEST_BRAIN rebase --abort"
+    exit 1
+  fi
+
+  ok "已拉取到 $(git_b rev-parse --short HEAD)"
+  cmd_link
+}
+
+# ---------- push ----------
+
+cmd_push() {
+  require_repo
+  init_refs
+  has_remote || die "未配置 origin，无法推送"
+
+  local msg="" assume_yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -m|--message) msg="${2:-}"; shift 2 ;;
+      -y|--yes) assume_yes=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+
+  git_b fetch --quiet origin || warn "fetch 失败，继续尝试本地提交"
+
+  local dirty ab ahead
+  dirty="$(dirty_files)"
+  ab="$(ahead_behind)"; ahead="${ab%% *}"
+
+  if [ -z "$dirty" ] && [ "$ahead" = 0 ]; then
+    ok "没有需要回传的改动"
+    return 0
+  fi
+
+  if [ -n "$dirty" ]; then
+    # 提交需要 author 身份，缺了会被 git 打断（盲测遗留）。新副本 install.sh 会写好，
+    # 老副本在这里给出补救命令，而不是让 git 抛一屏英文。
+    if ! git_b var GIT_AUTHOR_IDENT >/dev/null 2>&1; then
+      warn "本仓库还没配 git 身份，无法提交"
+      dim "  补一次即可（只写本仓库，不碰全局）："
+      dim "    git -C $NEST_BRAIN config user.name  <你的名字>"
+      dim "    git -C $NEST_BRAIN config user.email <你的名字>@nest.local"
+      dim "  或重跑：bash $NEST_BRAIN/install.sh --name <你的名字>"
+      return 1
+    fi
+
+    local skills_changed logs_changed other_changed
+    skills_changed="$(printf '%s\n' "$dirty" | grep ' skills/' || true)"
+    logs_changed="$(printf '%s\n' "$dirty" | grep ' logs/' || true)"
+    other_changed="$(printf '%s\n' "$dirty" | grep -v ' skills/' | grep -v ' logs/' || true)"
+
+    head1 "本次将提交的改动："
+    [ -n "$skills_changed" ] && { info "  技能："; printf '%s\n' "$skills_changed" | sed 's/^/    /'; }
+    [ -n "$logs_changed" ]   && { info "  日志："; printf '%s\n' "$logs_changed" | sed 's/^/    /'; }
+    [ -n "$other_changed" ]  && { info "  其他："; printf '%s\n' "$other_changed" | sed 's/^/    /'; }
+    printf '\n'
+
+    # 留痕提醒：改了工具/技能却没动日志，多半是忘了写。只提醒，不拦截。
+    if [ -z "$logs_changed" ] && { [ -n "$skills_changed" ] || [ -n "$other_changed" ]; }; then
+      warn "本次提交不含日志（logs/）更新"
+      dim "  自检三问：进度变了吗→INDEX；做了取舍吗→决策记录；踩了坑吗→踩坑文档"
+      dim "  确认无需留痕再继续"
+      printf '\n'
+    fi
+
+    if [ "$assume_yes" = 0 ]; then
+      # agent 和脚本都是非交互的，拿不到 /dev/tty。与其抛一行难看的报错，
+      # 不如直接说清楚该怎么办。
+      # 注意：不能用 [ -r /dev/tty ] 探测 —— 设备文件本身存在且可读，
+      # 但没有控制终端时真正"打开"才会失败。必须实际试开一次。
+      # 2>/dev/null 必须写在 </dev/tty 前面：重定向按从左到右生效，
+      # 写反了 bash 自己那行 "No such device" 仍会漏到 stderr。
+      if ! : 2>/dev/null </dev/tty; then
+        warn "非交互环境，无法当场确认"
+        dim "  看过上面的改动清单后，用：nest push -y -m \"说明\""
+        return 1
+      fi
+      printf '确认提交并推送？[y/N] '
+      local reply=""
+      read -r reply </dev/tty || true
+      case "$reply" in
+        y|Y|yes|YES) ;;
+        *) info "已取消"; return 1 ;;
+      esac
+    fi
+
+    if [ -z "$msg" ]; then
+      msg="sync: $(printf '%s\n' "$dirty" | wc -l | tr -d ' ') 个文件更新 @ $(hostname -s 2>/dev/null || hostname)"
+    fi
+
+    git_b add -A
+    git_b commit -q -m "$msg"
+    ok "已提交：$(git_b rev-parse --short HEAD)  $msg"
+  fi
+
+  push_with_rebase
+}
+
+# 推送；被拒绝时自动 rebase 重试一次，只有真冲突才停下来要人工
+push_with_rebase() {
+  if git_b push origin "HEAD:$BRANCH" 2>/dev/null; then
+    ok "已推送到云端"
+    return 0
+  fi
+
+  warn "云端有新提交，先 rebase 再重试"
+  git_b fetch --quiet origin || die "fetch 失败"
+  if ! git_b rebase "$REMOTE_REF"; then
+    printf '\n' >&2
+    warn "以下文件在两端都被修改，必须人工合并："
+    git_b diff --name-only --diff-filter=U | sed 's/^/  /' >&2
+    dim "  处理完运行 git -C $NEST_BRAIN rebase --continue && nest push"
+    dim "  放弃则运行 git -C $NEST_BRAIN rebase --abort"
+    exit 1
+  fi
+
+  git_b push origin "HEAD:$BRANCH" || die "推送失败，检查权限或网络"
+  ok "rebase 后已推送到云端"
+  cmd_link
+}
+
+# ---------- sync ----------
+
+# 先拉后推。顺序不能反：先把云端的拿下来，再把自己的送上去，
+# 否则本地提交会基于过时的历史，push 必然被拒后再绕一圈 rebase。
+cmd_sync() {
+  head1 "① 拉取云端"
+  cmd_pull --autostash
+  printf '\n'
+  head1 "② 回传本地"
+  cmd_push "$@"
+}
+
+# ---------- bind（.nest 门牌） ----------
+
+# .nest 门牌：底稿文件夹里的一个小文件，只记录「本目录对应 logs/ 下哪个节点」。
+# 它不是仓库副本 —— 内容永远只有真身仓库一份；门牌让 recall / 写日志自动找对节点，
+# 也从物理上杜绝把底稿文件夹推进仓库（底稿目录根本不是 git 仓库）。
+# 门牌可以嵌套：子目录的门牌默认挂在最近祖先门牌的节点之下，映射云端的项目嵌套。
+MARKER_NAME=".nest"
+
+# 从 $PWD 向上找最近的门牌。必须是普通文件 —— ~/.nest 是目录，天然跳过。
+# 在真身仓库内部不找门牌：它自己就是仓库，门牌无意义。
+find_marker() {
+  local d="$PWD"
+  case "$d/" in "$NEST_BRAIN"/*) return 1 ;; esac
+  while :; do
+    if [ -f "$d/$MARKER_NAME" ]; then printf '%s' "$d/$MARKER_NAME"; return 0; fi
+    [ "$d" = "/" ] && return 1
+    d="$(dirname "$d")"
+  done
+}
+
+marker_node() { sed -n 's/^node=//p' "$1" 2>/dev/null | head -n 1; }
+
+# 节点名规则：结构黑名单（空或全空白、含 / 或 \、前导 . 或 -、控制字符不行），中文名合法。
+# 英文小写 slug 仍是顶层项目的推荐形态（终端友好、全局可辨）；中文业务树也可以直接
+# 用中文文件夹原名（口播一致，recall 靠目录名 + 标题别名双通道匹配）。
+# 控制字符必须用 tr 长度比对查：grep 按行工作，永远看不见换行符本身。
+valid_slug() {
+  case "$1" in
+    ""|.*|-*|*/*|*\\*) return 1 ;;
+  esac
+  [ "$1" = "$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')" ] || return 1
+  [ -n "$(printf '%s' "$1" | LC_ALL=C tr -d '[:space:]')" ]
+}
+
+cmd_bind() {
+  require_repo
+  local arg="${1:-}"
+
+  case "$PWD/" in
+    "$NEST_BRAIN"/*) die "不能在 nest 仓库内部放门牌（这里本身就是仓库）" ;;
+  esac
+  [ "$PWD" = "$HOME" ] && die "不要把家目录整个绑定成一个项目，进具体的项目文件夹再 bind"
+
+  # 已有门牌且无参数：只展示，不修改
+  if [ -f "$PWD/$MARKER_NAME" ] && [ -z "$arg" ]; then
+    local cur; cur="$(marker_node "$PWD/$MARKER_NAME")"
+    [ -n "$cur" ] || die "$PWD/$MARKER_NAME 存在但没有 node= 行，删掉后重新 nest bind"
+    head1 "本目录已绑定：logs/$cur"
+    info "日志目录：$NEST_BRAIN/logs/$cur"
+    [ -f "$NEST_BRAIN/logs/$cur/INDEX.md" ] || warn "节点还没有 INDEX.md（先 nest pull 试试）"
+    dim "  解绑：rm $PWD/${MARKER_NAME}（云端内容不受影响）"
+    dim "  改绑：nest bind <slug 或 完整/节点/路径>"
+    return 0
+  fi
+
+  local node="" slug seg
+  case "$arg" in
+    */*)
+      # 带 / = 完整节点路径，无视祖先门牌
+      node="${arg#logs/}"; node="${node#/}"; node="${node%/}"
+      local IFS_SAVE="$IFS"; IFS='/'
+      for seg in $node; do
+        valid_slug "$seg" || { IFS="$IFS_SAVE"; die "「${seg}」不能做节点名：不能含 / 或 \\、不能以前导 . 或 - 开头、不能含控制字符"; }
+      done
+      IFS="$IFS_SAVE"
+      ;;
+    *)
+      slug="${arg:-$(basename "$PWD")}"
+      valid_slug "$slug" || die "文件夹名「${slug}」不能直接做节点名（含路径分隔符/控制字符，或以前导 . 或 - 开头）。自己起一个：nest bind <slug>"
+      # 祖先门牌（从父目录起找）决定挂载点：目录嵌套 = 云端节点嵌套
+      local pm=""
+      pm="$(cd "$PWD/.." && find_marker || true)"
+      if [ -n "$pm" ]; then
+        local pnode; pnode="$(marker_node "$pm")"
+        [ -n "$pnode" ] && node="$pnode/$slug" || node="$slug"
+        [ -n "$pnode" ] && dim "发现上级门牌 $(dirname "$pm") → logs/${pnode}，本目录挂在它之下"
+      else
+        node="$slug"
+      fi
+      ;;
+  esac
+
+  cat > "$PWD/$MARKER_NAME" <<EOF
+# nest 门牌：本目录对应云端 nest 仓库的 logs/${node}（此文件只是指针，不是仓库，不含内容）
+node=$node
+EOF
+  ok "已绑定 $PWD → logs/$node"
+
+  # 节点不存在就按规范模板建 INDEX（写进真身仓库，随下次 sync 上云）
+  local node_dir="$NEST_BRAIN/logs/$node"
+  if [ -f "$node_dir/INDEX.md" ]; then
+    info "节点已存在，直接挂上。看现状：nest recall"
+  else
+    mkdir -p "$node_dir"
+    local folder base
+    folder="$(basename "$PWD")"; base="${node##*/}"
+    { printf '# %s\n\n' "$([ "$folder" = "$base" ] && printf '%s' "$base" || printf '%s / %s' "$folder" "$base")"
+      printf '> 别名：%s\n> 状态：新建，待填写\n\n' "$folder"
+      printf '<一两句话说清这个项目是干嘛的。>\n\n'
+      printf '## 当前进度\n\n- 项目刚建立\n\n'
+      printf '## 文件索引\n\n<!-- 子项目由 recall 自动列出，不要手排进此表；此表只登记直属文件 -->\n| 文件 | 内容 |\n|---|---|\n\n'
+      printf '## 下一步\n\n- [ ] 填写 INDEX 的说明与进度\n'
+    } > "$node_dir/INDEX.md"
+    ok "已按模板新建 $node_dir/INDEX.md"
+    dim "  填好说明后 nest sync -m \"新项目：$node\" 上云"
+  fi
+}
+
+# ---------- recall ----------
+
+# 项目节点 = logs/ 下任意深度的、含 INDEX.md 的目录（云端与本地并集）。
+# 规则是递归的：`proj` 是节点，`proj/sub` 也是节点，深度不设上限。
+list_projects() {
+  {
+    remote_ref_exists && git_b ls-tree -r --name-only "$REMOTE_REF" -- logs/ 2>/dev/null || true
+    git_b ls-files --cached --others --exclude-standard -- logs/ 2>/dev/null || true
+  } | grep '/INDEX\.md$' | sed 's:/INDEX\.md$::' | LC_ALL=C sort -u || true
+}
+
+# 某节点的直属子项目（往下正好一层的节点）
+child_nodes() {
+  local proj="$1"
+  list_projects | awk -v p="$proj/" 'index($0, p) == 1 {
+    rest = substr($0, length(p) + 1)
+    if (rest !~ /\//) print
+  }'
+}
+
+# 某路径（文件或目录）的最后更新时间：优先 git 提交时间，未提交则用本地 mtime
+last_updated() {
+  local path="$1" t=""
+  t="$(git_b log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M' -- "$path" 2>/dev/null || true)"
+  if [ -z "$t" ] && [ -e "$NEST_BRAIN/$path" ]; then
+    t="$(date -r "$NEST_BRAIN/$path" '+%Y-%m-%d %H:%M' 2>/dev/null || true)"
+  fi
+  printf '%s' "${t:-未知}"
+}
+
+# 某节点整棵子树里的 .md 文件（云端与本地并集）
+list_tree_files() {
+  local proj="$1"
+  {
+    remote_ref_exists && git_b ls-tree -r --name-only "$REMOTE_REF" -- "$proj/" 2>/dev/null || true
+    git_b ls-files --cached --others --exclude-standard -- "$proj/" 2>/dev/null || true
+  } | grep -E '\.md$' | LC_ALL=C sort -u || true
+}
+
+# 某节点的直属 .md 文件（不含子项目子树、不含 INDEX 自身）
+list_project_files() {
+  local proj="$1"
+  list_tree_files "$proj" | awk -v p="$proj/" 'index($0, p) == 1 {
+    rest = substr($0, length(p) + 1)
+    if (rest !~ /\// && rest != "INDEX.md") print
+  }'
+}
+
+title_of() {
+  local path="$1" raw=""
+  if [ -f "$NEST_BRAIN/$path" ]; then
+    raw="$(head -n 20 "$NEST_BRAIN/$path" 2>/dev/null | grep -m1 '^#' || true)"
+  elif remote_ref_exists; then
+    raw="$(git_b show "$REMOTE_REF:$path" 2>/dev/null | head -n 20 | grep -m1 '^#' || true)"
+  fi
+  printf '%s\n' "${raw#\#}" | sed 's/^#*[[:space:]]*//'
+}
+
+# 输出 "项目路径<TAB>标题"（标题取 INDEX.md 首个一级标题）
+project_candidates() {
+  local d
+  list_projects | while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    printf '%s\t%s\n' "$d" "$(title_of "$d/INDEX.md")"
+  done
+}
+
+# 项目总览：顶层节点 + 最后更新时间 + 子项目数（这是将来 MCP list_projects 的雏形）
+recall_overview() {
+  head1 "现有项目："
+  local all d t subs
+  all="$(list_projects)"
+  printf '%s\n' "$all" | awk -F/ 'NF == 2' | while IFS= read -r d; do
+    t="$(title_of "$d/INDEX.md")"
+    subs="$(printf '%s\n' "$all" | grep -c "^$d/" || true)"
+    printf '  %-24s %s  %s%s\n' "$(basename "$d")" "$(last_updated "$d")" \
+      "${t:+— $t}" "${subs:+  (+$subs 子项目)}"
+  done | sed 's/  (+0 子项目)//'
+}
+
+show_log() {
+  local path="$1"
+  local local_file="$NEST_BRAIN/$path"
+  local has_remote_blob=0 has_local=0
+  remote_ref_exists && git_b cat-file -e "$REMOTE_REF:$path" 2>/dev/null && has_remote_blob=1
+  [ -f "$local_file" ] && has_local=1
+
+  head1 "文件：$path"
+  local t; t="$(title_of "$path")"
+  [ -n "$t" ] && info "标题：$t"
+
+  if [ "$has_remote_blob" = 1 ]; then
+    info "云端：$(git_b log -1 --format='%h  %cd  %an' --date=format:'%Y-%m-%d %H:%M' "$REMOTE_REF" -- "$path")"
+  else
+    info "云端：(不存在，本地新增未推送)"
+  fi
+  if [ "$has_local" = 1 ]; then
+    info "本地：$(date -r "$local_file" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '未知')"
+  else
+    info "本地：(不存在，仅云端有)"
+  fi
+
+  # 状态判定：三方比对 blob 哈希（工作区 / HEAD / 云端），全程不动工作区
+  local state="同步" hint=""
+  if [ "$has_remote_blob" = 1 ] && [ "$has_local" = 1 ]; then
+    local lh rh hh
+    lh="$(git_b hash-object -- "$local_file")"
+    rh="$(git_b rev-parse "$REMOTE_REF:$path")"
+    hh="$(git_b rev-parse "HEAD:$path" 2>/dev/null || echo none)"
+    if [ "$lh" = "$rh" ]; then
+      state="同步"
+    elif [ "$lh" = "$hh" ]; then
+      state="云端已更新，本地是旧版"; hint="→ nest pull"
+    elif [ "$rh" = "$hh" ]; then
+      state="本地有未推送的改动"; hint="→ nest push"
+    else
+      state="两端都改过，需要人工合并"; hint="→ nest pull 会走 rebase，冲突时人工处理"
+    fi
+  elif [ "$has_local" = 1 ]; then
+    state="本地独有，未推送"
+  else
+    state="仅云端有"
+  fi
+  info "状态：$state${hint:+  $hint}"
+
+  if [ -n "$hint" ]; then
+    printf '\n'
+    head1 "差异（云端 → 本地）："
+    diff -u -L "云端/$path" -L "本地/$path" \
+      <(git_b show "$REMOTE_REF:$path") "$local_file" | sed 's/^/  /' || true
+  fi
+
+  printf '\n'
+  local content_src
+  if [ "$has_local" = 1 ]; then
+    content_src="$(cat "$local_file")"
+    head1 "内容（本地版本）："
+  else
+    content_src="$(git_b show "$REMOTE_REF:$path")"
+    head1 "内容（云端版本）："
+  fi
+
+  local n; n="$(printf '%s\n' "$content_src" | wc -l | tr -d ' ')"
+  if [ "$n" -gt "$NEST_RECALL_MAX_LINES" ]; then
+    printf '%s\n' "$content_src" | head -n "$NEST_RECALL_MAX_LINES"
+    printf '\n'
+    dim "… 共 $n 行，已截断。完整内容：$NEST_BRAIN/$path"
+  else
+    printf '%s\n' "$content_src"
+  fi
+}
+
+# 节点视图：INDEX + 子项目（含更新时间）+ 直属文件。深度信息全部由目录结构派生。
+show_node() {
+  local proj="$1"
+  local index_path="$proj/INDEX.md"
+
+  if git_b cat-file -e "$REMOTE_REF:$index_path" 2>/dev/null || [ -f "$NEST_BRAIN/$index_path" ]; then
+    show_log "$index_path"
+  else
+    warn "$proj 缺少 INDEX.md（按约定每个项目必须有统括文件）"
+  fi
+
+  local children d t
+  children="$(child_nodes "$proj")"
+  if [ -n "$children" ]; then
+    printf '\n'
+    head1 "子项目："
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      t="$(title_of "$d/INDEX.md")"
+      printf '  %-28s %s  %s\n' "$(basename "$d")/" "$(last_updated "$d")" "${t:+— $t}"
+    done <<< "$children"
+  fi
+
+  printf '\n'
+  head1 "直属文件："
+  local f others=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '  %-32s %s\n' "${f#"$proj"/}" "$(last_updated "$f")"
+    others=$((others + 1))
+  done <<< "$(list_project_files "$proj")"
+  [ "$others" = 0 ] && dim "  (无)"
+
+  { [ -n "$children" ] || [ "$others" -gt 0 ]; } && \
+    dim "  → nest recall $(basename "$proj") <关键词> 钻进子项目或文件"
+  return 0
+}
+
+cmd_recall() {
+  require_repo
+  init_refs
+  local query="${1:-}" drill="${2:-}"
+
+  # 只读：只 fetch，绝不触碰工作区，因此本地脏也能用
+  fetch_quiet || true
+
+  # --all / -a：强制顶层总览（无视门牌）
+  if [ "$query" = "--all" ] || [ "$query" = "-a" ]; then
+    query=""
+  elif [ -z "$query" ]; then
+    # 无参数：当前目录（或上级）有 .nest 门牌就唤回绑定的节点
+    local mk mnode
+    if mk="$(find_marker)"; then
+      mnode="$(marker_node "$mk")"
+      if [ -n "$mnode" ]; then
+        dim "（门牌 $(dirname "$mk") → logs/${mnode}；看全部项目：nest recall --all）"
+        show_node "logs/$mnode"
+        return 0
+      fi
+      warn "$mk 缺 node= 行，忽略门牌"
+    fi
+  fi
+
+  # 无参数（且无门牌）= 顶层总览
+  if [ -z "$query" ]; then
+    recall_overview
+    printf '\n'
+    dim "用法：nest recall <项目> 看统括；nest recall <项目> <关键词> 钻子项目或子文件"
+    return 0
+  fi
+
+  local all matches count
+  all="$(project_candidates)"
+  [ -n "$all" ] || die "logs/ 下没有任何项目"
+
+  # 任意深度按目录名匹配，再退回到标题
+  matches="$(printf '%s\n' "$all" | awk -F'\t' -v q="$query" '
+    { n = split($1, parts, "/"); base = parts[n] }
+    index(base, q) > 0 { print }
+  ')"
+  if [ -z "$matches" ]; then
+    matches="$(printf '%s\n' "$all" | grep -F -- "$query" || true)"
+  fi
+  count="$(printf '%s' "$matches" | grep -c '' || true)"
+
+  if [ -z "$matches" ]; then
+    warn "没有匹配「${query}」的项目"
+    printf '\n'
+    recall_overview
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    head1 "匹配到 $count 个项目，请指明具体哪个（可用更完整的名字重查）："
+    printf '%s\n' "$matches" | awk -F'\t' '{ printf "  %d. %s%s\n", NR, $1, ($2 == "" ? "" : "  — " $2) }'
+    return 0
+  fi
+
+  local proj
+  proj="$(printf '%s\n' "$matches" | cut -f1)"
+
+  if [ -z "$drill" ]; then
+    show_node "$proj"
+    return 0
+  fi
+
+  # 钻取：先在子树的节点里找，再在子树的文件里找
+  local nmatches ncount
+  nmatches="$(list_projects | awk -v p="$proj/" -v q="$drill" '
+    index($0, p) == 1 { n = split($0, parts, "/"); base = parts[n]
+      if (index(base, q) > 0) print }
+  ')"
+  ncount="$(printf '%s' "$nmatches" | grep -c '' || true)"
+  if [ "$ncount" = 1 ]; then
+    show_node "$(printf '%s\n' "$nmatches")"
+    return 0
+  fi
+  if [ "$ncount" -gt 1 ]; then
+    head1 "匹配到 $ncount 个子项目："
+    printf '%s\n' "$nmatches" | sed "s|^$proj/||" | awk '{ printf "  %d. %s\n", NR, $0 }'
+    return 0
+  fi
+
+  local fmatches fcount
+  fmatches="$(list_tree_files "$proj" | awk -v q="$drill" '
+    { n = split($0, parts, "/"); base = parts[n] }
+    base != "INDEX.md" && index(base, q) > 0 { print }
+  ')"
+  fcount="$(printf '%s' "$fmatches" | grep -c '' || true)"
+  if [ -z "$fmatches" ]; then
+    warn "「${query}」子树里没有匹配「${drill}」的子项目或文件"
+    show_node "$proj"
+    exit 1
+  fi
+  if [ "$fcount" -gt 1 ]; then
+    head1 "匹配到 $fcount 个文件："
+    printf '%s\n' "$fmatches" | sed "s|^$proj/||" | awk '{ printf "  %d. %s\n", NR, $0 }'
+    return 0
+  fi
+  show_log "$(printf '%s\n' "$fmatches")"
+}
+
+# ---------- 入口 ----------
+
+usage() {
+  cat <<'EOF'
+nest — 跨设备技能库 / 日志库同步（第一阶段）
+
+  nest sync [-m 说明] [-y]     一次搞定：先拉后推
+  nest status [--no-fetch]     查看本地与云端差异
+  nest pull [--autostash]      从云端拉取（rebase）并重建软链
+  nest push [-m 说明] [-y]     把本地改动回传云端
+  nest recall [项目] [关键词]  项目总览 / 项目统括 / 钻子文件，全程只读
+  nest recall --all            强制顶层总览（无视 .nest 门牌）
+  nest bind [slug|节点/路径]   把当前底稿文件夹绑定到 logs/ 下的节点（.nest 门牌）
+  nest link                    重建 skills 软链
+
+约定：开工前 nest pull，收工后 nest push；懒得分的话 nest sync 一把梭。
+门牌：在绑定过的文件夹里，nest recall 不带参数直接唤回对应项目。
+EOF
+}
+
+main() {
+  local self cmd
+  self="$(basename "$0")"
+  case "$self" in
+    nest-*) cmd="${self#nest-}" ;;
+    *) cmd="${1:-}"; [ $# -gt 0 ] && shift ;;
+  esac
+
+  case "$cmd" in
+    status)  cmd_status "$@" ;;
+    sync)    cmd_sync "$@" ;;
+    pull)    cmd_pull "$@" ;;
+    push)    cmd_push "$@" ;;
+    recall)  cmd_recall "$@" ;;
+    bind)    cmd_bind "$@" ;;
+    link)    cmd_link "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) die "未知子命令：${cmd}（运行 nest --help）" ;;
+  esac
+}
+
+main "$@"

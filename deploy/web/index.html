@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nest — 跨设备技能库与日志库</title>
+<meta name="description" content="跨设备技能库与日志库。agent 与新设备的接入入口。">
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1a1a1a; --dim: #6b6b6b; --line: #e2ded8;
+    --card: #ffffff; --code-bg: #f4f2ee; --accent: #8a5a2b;
+    --warn-bg: #fdf6e8; --warn-line: #e0c9a0;
+    --danger: #a03530; --danger-bg: #fdf0ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a; --fg: #e8e6e3; --dim: #9a9792; --line: #2e3035;
+      --card: #1d1f23; --code-bg: #24262b; --accent: #d0a070;
+      --warn-bg: #2a2418; --warn-line: #5a4a28;
+      --danger: #e08a84; --danger-bg: #2c1d1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16171a; --fg: #e8e6e3; --dim: #9a9792; --line: #2e3035;
+    --card: #1d1f23; --code-bg: #24262b; --accent: #d0a070;
+    --warn-bg: #2a2418; --warn-line: #5a4a28;
+    --danger: #e08a84; --danger-bg: #2c1d1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 3rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 44rem; margin: 0 auto; }
+  .brand { font-size: 2rem; margin: 0 0 .2rem; letter-spacing: -.02em; }
+  .brand .glyph { margin-right: .4rem; }
+  .tag { color: var(--dim); font-size: .92rem; margin: 0 0 2.5rem; }
+  h2 {
+    font-size: 1.05rem; margin: 2.75rem 0 .9rem;
+    padding-top: 1.1rem; border-top: 1px solid var(--line);
+  }
+  p { margin: .85rem 0; }
+  code {
+    background: var(--code-bg); padding: .12em .4em; border-radius: 3px;
+    font: .875em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-word;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .9rem 1rem; overflow-x: auto; margin: .9rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: .82rem; line-height: 1.65; }
+  .agent {
+    background: var(--card); border: 1px solid var(--line);
+    border-left: 3px solid var(--accent); border-radius: 6px;
+    padding: 1.1rem 1.25rem; margin: 1.5rem 0;
+  }
+  .agent p:first-child { margin-top: 0; }
+  .agent p:last-child { margin-bottom: 0; }
+  .agent .who { font-size: .78rem; text-transform: uppercase; letter-spacing: .07em;
+                color: var(--accent); font-weight: 700; margin-bottom: .5rem; }
+  ol { padding-left: 1.4rem; }
+  ol li { margin: .5rem 0; }
+  .note { background: var(--warn-bg); border: 1px solid var(--warn-line);
+          border-radius: 6px; padding: .9rem 1.1rem; margin: 1.3rem 0; font-size: .93rem; }
+  .danger { background: var(--danger-bg); border: 1px solid var(--danger);
+            border-radius: 6px; padding: .9rem 1.1rem; margin: 1.3rem 0; font-size: .93rem; }
+  .danger strong { color: var(--danger); }
+  .note p:first-child, .danger p:first-child { margin-top: 0; }
+  .note p:last-child, .danger p:last-child { margin-bottom: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--dim); font-size: .85rem; }
+  .wrap { overflow-x: auto; }
+  a { color: var(--accent); }
+  footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--line);
+           color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1 class="brand"><span class="glyph">🪹</span>nest</h1>
+<p class="tag">跨设备技能库与日志库 · Git 为唯一权威</p>
+
+<div class="agent">
+  <p class="who">如果你是 agent</p>
+  <p>本页有一份等价的纯文本版，更适合你直接读取和执行（整站需认证）：</p>
+  <pre><code>curl -sS --user '&lt;用户名&gt;' https://nest.example.com/nest.md</code></pre>
+  <p>先跑这一句判断本机状态，再决定走哪条路：</p>
+  <pre><code>command -v nest &gt;/dev/null 2&gt;&amp;1 &amp;&amp; nest status || echo "NOT_INSTALLED"</code></pre>
+</div>
+
+<h2>这是什么</h2>
+<p>所有设备、所有 harness（Claude Code、Codex、Kimi Code 等）共享同一份内容：</p>
+<ul>
+  <li><strong>技能库</strong> —— 工作方法论。任一端更新，回传后其他端立即生效</li>
+  <li><strong>日志库</strong> —— 项目进度、复盘、配置备忘录。可按项目名唤回，不必手动翻找复制粘贴</li>
+</ul>
+<p>底层是一个托管在自己服务器上的 Git 仓库，<strong>它是唯一权威</strong>。所有命令都只是它的包装。</p>
+
+<h2>怎么接入</h2>
+<p>需要管理员人工批准。除第 2 步和第 4 步外都可以自动完成。</p>
+<ol>
+  <li><strong>生成钥匙</strong> —— <code>ssh-keygen -t ed25519 -f ~/.ssh/nest_key</code>，只接受 ed25519</li>
+  <li><strong>向管理员索取访问凭证</strong> —— 本站整站需要认证，凭证不公开</li>
+  <li><strong>提交公钥</strong> —— 标识自选但不可与已有条目重名，拿到申请编号和指纹</li>
+  <li><strong>把指纹报给管理员</strong> —— 核对无误后批准</li>
+  <li><strong>配置 SSH 并克隆</strong> —— 跑 <code>install.sh</code> 完成全部初始化</li>
+  <li><strong>验证</strong> —— <code>nest status</code> 和 <code>nest recall &lt;项目名&gt;</code></li>
+</ol>
+<p>完整命令见<a href="/nest.md">纯文本版</a>。</p>
+
+<div class="note">
+<p><strong>第 4 步不能跳过。</strong>申请页面的密码是共享的，只能挡住扫描器；真正拦住冒名提交的，
+是管理员拿你报的指纹和服务器上收到的申请做的那次核对。两边对不上就不会批准。</p>
+</div>
+
+<p>接入完成后，<code>nest</code> 技能会<strong>自动安装</strong>到你的 harness 技能目录（软链到仓库，随仓库更新）。
+以后关于 nest 的任何用法直接查那个技能，不必再回到本页。</p>
+
+<h2>日常使用</h2>
+<div class="wrap">
+<table>
+<tr><th>命令</th><th>用途</th></tr>
+<tr><td><code>nest pull</code></td><td>开工前，拉云端最新并重建技能软链</td></tr>
+<tr><td><code>nest push -m "说明"</code></td><td>收工后，回传本地改动</td></tr>
+<tr><td><code>nest recall &lt;项目名&gt;</code></td><td>唤回项目日志。纯只读，工作区有未提交改动时照样能用</td></tr>
+<tr><td><code>nest status</code></td><td>看本地与云端差在哪</td></tr>
+</table>
+</div>
+<p>技能真身在 <code>~/.nest/git/skills/</code>，各 harness 目录是软链过去的。
+直接改真身，所有 harness 立即生效。<strong>绝不要维护第二份副本。</strong></p>
+
+<h2>红线</h2>
+<div class="danger">
+<p><strong>绝不能提交进这个仓库：</strong>API key、token、密码、证书私钥、个人隐私资料。</p>
+<p>仓库有两道自动扫描闸门，但闸门只认已知格式，不替代判断。日志涉及真实主体时一律用
+<code>[客户A]</code> 这类代号。判断标准：<strong>只放"丢了会心疼但不致命"的东西。</strong></p>
+</div>
+
+<footer>
+接入遇到问题直接问管理员。钥匙丢失或设备停用，立刻联系吊销 —— 报当初提交的标识即可。
+</footer>
+
+</main>
+</body>
+</html>
