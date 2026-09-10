@@ -7,7 +7,7 @@
 #   nest pull              从云端拉取（rebase），并重建 skills 软链
 #   nest push [-m 说明]    把本地改动回传云端
 #   nest recall [项目] [关键词]  项目总览 / 统括 / 子文件，全程只读
-#   nest bind [slug]       把当前底稿文件夹绑定到 logs/ 节点（.nest 门牌）
+#   nest bind [slug]       把当前工作文件夹绑定到 logs/ 节点（.nest 门牌）
 #   nest link              重建 skills 软链
 #
 # 也可用 nest-sync / nest-status / nest-pull / nest-push / nest-recall 等价调用。
@@ -487,9 +487,9 @@ cmd_sync() {
 
 # ---------- bind（.nest 门牌） ----------
 
-# .nest 门牌：底稿文件夹里的一个小文件，只记录「本目录对应 logs/ 下哪个节点」。
+# .nest 门牌：工作文件夹里的一个小文件，只记录「本目录对应 logs/ 下哪个节点」。
 # 它不是仓库副本 —— 内容永远只有真身仓库一份；门牌让 recall / 写日志自动找对节点，
-# 也从物理上杜绝把底稿文件夹推进仓库（底稿目录根本不是 git 仓库）。
+# 也从物理上杜绝把工作文件夹推进仓库（工作目录根本不是 git 仓库）。
 # 门牌可以嵌套：子目录的门牌默认挂在最近祖先门牌的节点之下，映射云端的项目嵌套。
 MARKER_NAME=".nest"
 
@@ -898,7 +898,7 @@ nest — 跨设备技能库 / 日志库同步（第一阶段）
   nest push [-m 说明] [-y]     把本地改动回传云端
   nest recall [项目] [关键词]  项目总览 / 项目统括 / 钻子文件，全程只读
   nest recall --all            强制顶层总览（无视 .nest 门牌）
-  nest bind [slug|节点/路径]   把当前底稿文件夹绑定到 logs/ 下的节点（.nest 门牌）
+  nest bind [slug|节点/路径]   把当前工作文件夹绑定到 logs/ 下的节点（.nest 门牌）
   nest link                    重建 skills 软链
 
 约定：开工前 nest pull，收工后 nest push；懒得分的话 nest sync 一把梭。

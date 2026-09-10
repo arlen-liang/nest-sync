@@ -1,50 +1,131 @@
 # nest-sync
 
-One Git repository as the single source of truth for agent skills and project
-logs, shared across machines and harnesses.
+[中文](README.md) | **English**
 
-## What it is
+nest-sync puts agent skills and project logs into one Git repository. The first
+version went live on a server in August 2026 and has been in daily use across a
+few machines since.
 
-`nest-sync` keeps two trees in one repository: `skills/<category>/<name>/` for
-reusable agent skills (symlinked into each harness) and `logs/<project>/` for
-project logs, progress notes and decision records. A single bash CLI
-(`bin/nest`) wraps Git with seven subcommands: pull, push, sync, recall, bind,
-link, status. No daemon, no external service.
+The situation it is built for: the same set of agents, running on different
+servers.
 
 ## Why
 
-Agents run on more than one machine. Without a shared source of truth, a skill
-edited on one machine stays stale on another, and nobody can tell who changed
-what, when, or why. `nest-sync` answers all three from Git history.
+With agents on one machine, keeping skills in a local directory is enough. Run
+them on several and problems show up one after another. Edit a skill on one
+side and the other side stays stale until someone copies it over by hand. Who
+changed which sentence, when, and why is scattered across terminal histories —
+three months later all that survives is "this prompt has always been like
+that". Project logs live in local files, so switching machines means starting
+the search over.
+
+nest-sync hands all of this to Git. Git was designed for exactly the shape of
+the problem — many copies, one line of history — and its version history, diff,
+conflict detection and offline availability happen to answer each of the
+problems above. The repository is the single source of truth; everything else
+is packaging around it.
+
+## Architecture at a glance
+
+```
+Device
+  ~/.nest/git              Git working copy; connection key pinned by repo-level core.sshCommand
+  ~/.nest/bin/nest         A single bash script, seven subcommands
+  <harness>/skills/<name>  One-level symlink → repo skills/<category>/<skill>
+        │
+        │  ssh git@<your-server>  (the git user may only send and receive the repo)
+        ▼
+Server
+  /srv/git/nest-sync.git      Bare repository, the only authoritative copy
+    hooks/pre-receive         Server-side key gate, cannot be bypassed
+  /opt/nest-enroll/           Enrollment service (unprivileged user, loopback only)
+  /usr/local/sbin/nest-keys   Key roster management (root, server-local only)
+  /var/www/nest/              Landing page and enrollment form
+  /var/lib/nest-enroll/       Pending queue, decisions, audit log
+```
+
+Three design choices are worth calling out on their own.
+
+| Mechanism | What it does |
+|---|---|
+| Skills distributed by symlink | There is only one real copy, in the repository; each harness's skills directory holds a symlink. Edit the real copy and every harness picks it up immediately — "a second copy drifting" does not exist structurally |
+| Working folders joined by a door-plate pointer | Project materials and attachments stay in their own folders and never enter the repository; a `.nest` pointer file records which `logs/<node>/` it belongs to. Pointers nest, so nested directories mean nested nodes. And because those folders are not Git repositories at all, the project materials physically cannot be pushed to the cloud |
+| Two key gates | A local `pre-commit` and a server-side `pre-receive`, each scanning once. The local one can be skipped with `--no-verify`; the server-side one cannot. The first guards against slips, the second against intent |
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `nest pull` | Before work: fetch the latest from the server and rebuild the skill symlinks |
+| `nest push -m "message"` | After work: commit and push local changes; on rejection, retry once with an automatic rebase |
+| `nest sync -m "message"` | Pull then push, in one shot |
+| `nest recall [project] [keyword]` | Recall logs. Strictly read-only, works offline and with a dirty working tree |
+| `nest bind [slug]` | Bind the current working directory to a node under `logs/` |
+| `nest status` | See how local and server diverge |
+| `nest link [--force]` | Rebuild skill symlinks, filterable by category |
 
 ## Quick start
 
-Self-hosting needs a server with a bare Git repository and SSH access for a
-restricted `git` user. Full walkthrough: `deploy/web/nest.md`.
+You need a server that can run SSH and Git. The full self-hosting walkthrough
+is in `deploy/web/nest.md` (in Chinese).
 
 ```bash
-git clone git@nest.example.com:/srv/git/nest-sync.git ~/.nest/git
-bash ~/.nest/git/install.sh
-export PATH="$HOME/.nest/bin:$PATH"
+# 1. Generate a dedicated key (ed25519 only)
+ssh-keygen -t ed25519 -f ~/.ssh/nest_key -N "" -C "identifier for this machine"
 
-nest pull                   # before work: fetch and relink skills
-nest push -m "what changed" # after work: commit and push
-nest recall <project>       # read a project log (read-only, works offline)
-nest bind                   # bind a working folder to a log node
+# 2. Submit an enrollment request, then report the fingerprint to the
+#    administrator through a different channel
+#    Do not skip this step: the shared password on the site only stops
+#    scanners — what actually stops an impersonated submission is the
+#    cross-channel fingerprint check
+
+# 3. Install once approved
+curl -sS https://nest.example.com/install.sh -o /tmp/nest-install.sh
+bash /tmp/nest-install.sh \
+  --repo git@nest.example.com:/srv/git/nest-sync.git \
+  --key ~/.ssh/nest_key --name <identifier for this machine> -y
+
+# 4. Verify
+nest status && nest recall <project>
 ```
+
+Day to day there are only two rules: `nest pull` before work, `nest push` after
+work. If you cannot be bothered to tell them apart, `nest sync`.
 
 ## Documentation
 
-`docs/architecture.md`, `docs/security-model.md`, `docs/decisions.md`,
-`examples/` (two example skills), and `deploy/README.md`.
+| File | Contents |
+|---|---|
+| `docs/architecture.md` (in Chinese) | System architecture: Git as the hub, subcommands, symlink distribution, the door-plate mechanism, the enrollment flow |
+| `docs/security-model.md` (in Chinese) | Trust boundaries and data classification, the two gates, why keys are not synced across machines |
+| `docs/decisions.md` (in Chinese) | Key design decisions and their trade-offs, including a "things we deliberately do not do" list |
+| `examples/nest-skill/` (in Chinese) | Example skill: what a nest skill should look like, with progressive loading of references |
+| `examples/skill-authoring/` (in Chinese) | Example skill: the authoring conventions for turning one piece of real work into a reusable skill |
+| `deploy/README.md` | What the server-side deployment consists of and how to redeploy it |
 
 ## Known limitations
 
-- **Single point of failure.** The server-side bare repository is the only
-  authoritative copy; machine-local clones are not independent backups.
-- **Not for large files.** Binaries and images are excluded by design.
-- **Manual sync.** No file watcher, no background process.
+The biggest caveat is the **single point**: the bare repository on the server is
+the only authoritative copy, and every device's working copy ultimately falls
+back to it, so it does not count as an independent backup. The repository can be
+cloned elsewhere at any time, but nothing guarantees that you will ever remember
+to do it. For real production use, a third physical location is the missing
+piece.
 
-## License
+Next, it is **not suited to large files**. Binaries and Office documents stay out
+of the repository entirely — once they are in Git history they occupy space
+permanently and cannot be fully removed. The repository is meant as a plain-text
+content library; sharing images or attachments needs another route.
 
-MIT. See `LICENSE`.
+Finally, syncing is entirely manual: no file watcher, no background process.
+Not pushing means not having written anything.
+
+## License and maintenance
+
+MIT, see `LICENSE`.
+
+This is a personal showcase project: an attempt to write down a setup I use
+myself in a readable form. Issues are welcome, but there is no promised response
+time and no commitment to ongoing maintenance; large changes made without prior
+discussion are quite likely to be closed outright — see `docs/decisions.md`. Read
+`CONTRIBUTING.md` before contributing.

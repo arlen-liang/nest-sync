@@ -32,7 +32,7 @@ skills/<大类>/<kebab-case-英文名>/
 （可选）templates/     # 需要复用的模板文件
 ```
 
-- 目录名用英文 kebab-case（`contract-review`、`sanhui-witness`），**不用中文名**
+- 目录名用英文 kebab-case（`contract-review`、`weekly-report`），**不用中文名**
 - SKILL.md 保持精简（百来行），厚重内容（清单、语料、格式细节、注册表）一律下沉
   references，SKILL.md 末尾给"按需加载表"
 
