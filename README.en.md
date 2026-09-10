@@ -32,6 +32,11 @@ All of this points at the same gap: context, skills and material each sit in a
 corner of their own. nest-sync's answer is a shared one — a self-hosted Git
 repository as the single source of truth. Everything else is packaging around it.
 
+Writing a skill is only the start. The authoring conventions later became a project
+of their own, [skill-authoring](https://github.com/arlen-liang/skill-authoring): it
+governs how skills grow, nest-sync governs how they stay current on every machine,
+and the two together make up a full iteration.
+
 ## Architecture at a glance
 
 ```
@@ -107,7 +112,7 @@ work. If you cannot be bothered to tell them apart, `nest sync`.
 | `docs/security-model.md` (in Chinese) | Trust boundaries and data classification, the two gates, why keys are not synced across machines |
 | `docs/decisions.md` (in Chinese) | Key design decisions and their trade-offs, including a "things we deliberately do not do" list |
 | `examples/nest-skill/` (in Chinese) | Example skill: what a nest skill should look like, with progressive loading of references |
-| `examples/skill-authoring/` (in Chinese) | Example skill: the authoring conventions for turning one piece of real work into a reusable skill |
+| [`skill-authoring`](https://github.com/arlen-liang/skill-authoring) | Now a project of its own: the authoring conventions for turning one piece of real work into a reusable skill (`examples/skill-authoring/` is a pointer only) |
 | `deploy/README.md` | What the server-side deployment consists of and how to redeploy it |
 
 ## Known limitations

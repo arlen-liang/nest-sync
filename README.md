@@ -23,6 +23,10 @@ nest-sync 把 agent 的技能与项目日志收进同一个 Git 仓库。第一�
 这几件事指向同一个缺口：上下文、技能、材料各待在自己的角落。nest-sync 的做法是给它们
 一个共同落点——自托管的 Git 仓库做唯一的事实来源，其余一切都只是它的包装。
 
+技能写出来只是开始。写作规范那部分后来独立成了单独的项目
+[skill-authoring](https://github.com/arlen-liang/skill-authoring)：它管技能怎么长出来，
+nest-sync 管技能怎么在每台机器上保持最新，两件事扣起来才算一轮完整的迭代。
+
 ## 架构速览
 
 ```
@@ -94,7 +98,7 @@ nest status && nest recall <项目名>
 | `docs/security-model.md` | 信任边界与数据分级、两道闸门、为什么密钥不做多端同步 |
 | `docs/decisions.md` | 关键设计决策及其取舍，含一张"明确不做的事"清单 |
 | `examples/nest-skill/` | 示例技能：一个 nest 技能该长什么样，含 references 渐进加载 |
-| `examples/skill-authoring/` | 示例技能：把一次实操沉淀为可复用技能的编写规范 |
+| [`skill-authoring`](https://github.com/arlen-liang/skill-authoring) | 已独立成库：把一次实操沉淀为可复用技能的编写规范（`examples/skill-authoring/` 只留指路） |
 | `deploy/README.md` | 服务端部署件的组成与重新部署方式 |
 
 ## 隐患
