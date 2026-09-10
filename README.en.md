@@ -11,19 +11,26 @@ servers.
 
 ## Why
 
-With agents on one machine, keeping skills in a local directory is enough. Run
-them on several and problems show up one after another. Edit a skill on one
-side and the other side stays stale until someone copies it over by hand. Who
-changed which sentence, when, and why is scattered across terminal histories —
-three months later all that survives is "this prompt has always been like
-that". Project logs live in local files, so switching machines means starting
-the search over.
+It started with memos. Context was recalled from a memo per agent, and once there
+were several agents, keeping those memos in step became manual labour: the same
+context had to be stored in several places, and editing one copy told the others
+nothing.
 
-nest-sync hands all of this to Git. Git was designed for exactly the shape of
-the problem — many copies, one line of history — and its version history, diff,
-conflict detection and offline availability happen to answer each of the
-problems above. The repository is the single source of truth; everything else
-is packaging around it.
+Skills brought a further layer of trouble: a skill improves by iteration, and the
+ideas come in clusters. Several tasks running at once can each throw up a revision
+within the same stretch of time, and each one sits in its own session, collecting
+nowhere. Even once collected they have to be distributed, and every harness keeps
+its own skills directory — one per machine, and laying them out by hand costs half
+a day.
+
+Then came the constraint of connection: agents on a local machine are not always
+online, and agents in the cloud cannot reach the local files that change fastest.
+The two sides cannot see each other. Agent-to-agent communication had nowhere to
+live either.
+
+All of this points at the same gap: context, skills and material each sit in a
+corner of their own. nest-sync's answer is a shared one — a self-hosted Git
+repository as the single source of truth. Everything else is packaging around it.
 
 ## Architecture at a glance
 
